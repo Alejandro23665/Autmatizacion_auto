@@ -5,7 +5,7 @@ from pywinauto import Application
 
 from .window_utils import wait_for_window, get_window_info, WindowNotFoundError, wait_for_title_change
 from .dialogs import handle_mode_selection_dialog, handle_open_project_window, wait_for_main_verification_window
-from .queues import select_auto_queue_and_open_boleta, post_boleta_action
+from .queues import select_auto_queue_and_open_boleta, post_boleta_action, process_auto_queue_loop, find_queue_table, find_auto_row, get_cell_text
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -22,14 +22,15 @@ def launch_verification_station(
     backend: str = 'uia'
 ) -> Tuple[Application, object]:
     '''
-    Flujo completo Tareas 1+2+3:
+    Flujo completo Tareas 1+2+3+4+5:
     1. Inicia proceso
     2. Diálogo 'Seleccionar modo' -> Click 'Aceptar'
     3. Ventana principal 'Estación de verificación'
     4. Ventana hija 'Abrir proyecto' -> Click 'Aceptar'
     5. Espera título URL proyecto
-    6. Click izquierdo fila AUTO + Ctrl+G -> Abre boleta (título cambia a fecha_id)
-    7. TAREA 3: Ctrl+L en boleta + esperar 10s + cerrar app
+    6. Lee recuento AUTO (columna 3)
+    7. Loop: Click AUTO + Ctrl+G + Alt+G (1ra) -> esperar boleta -> Ctrl+L + 5s x N boletas
+    8. Cerrar app al final
     
     Returns:
         (app, main_window)
@@ -69,19 +70,40 @@ def launch_verification_station(
     except WindowNotFoundError:
         logger.warning('Título no cambió a URL del proyecto, pero continuando...')
     
-    # 6. NUEVO: Seleccionar cola AUTO y abrir boleta
-    logger.info('Iniciando selección de cola AUTO y apertura de boleta...')
-    boleta_window = select_auto_queue_and_open_boleta(main_window, app, timeout=timeout_queue_selection)
+    # 6. NUEVO: Leer recuento AUTO y procesar loop completo
+    logger.info('Buscando tabla de colas y fila AUTO...')
+    table = find_queue_table(main_window, timeout=15)
+    if not table:
+        logger.error('No se pudo encontrar la tabla de colas')
+        return app, main_window
     
-    if boleta_window:
-        logger.info(f'✅ Boleta abierta: {boleta_window.window_text()}')
-        
-        # 7. TAREA 3: Ctrl+L + esperar 10s + cerrar
-        logger.info('=== TAREA 3: Post-boleta ===')
-        post_boleta_action(boleta_window)
-        logger.info('✅ Flujo completo (Tareas 1+2+3) finalizado')
+    auto_row = find_auto_row(table, timeout=10)
+    if not auto_row:
+        logger.error('No se encontró la fila AUTO')
+        return app, main_window
+    
+    # Leer recuento (columna 3)
+    recuento_text = get_cell_text(auto_row, 3)
+    logger.info(f'Cantidad de AUTO (Recuento tareas con forma): {recuento_text}')
+    print(f'Cantidad de AUTO: {recuento_text}')
+    
+    try:
+        auto_count = int(recuento_text.strip())
+    except ValueError:
+        logger.error(f'No se pudo parsear el recuento: {recuento_text}')
+        return app, main_window
+    
+    if auto_count <= 0:
+        logger.warning('Recuento AUTO es 0 o negativo, no hay boletas para procesar')
+        return app, main_window
+    
+    logger.info(f'Iniciando loop AUTO para {auto_count} boletas...')
+    success = process_auto_queue_loop(main_window, app, auto_count, timeout=timeout_queue_selection)
+    
+    if success:
+        logger.info('Loop AUTO completado exitosamente')
     else:
-        logger.warning('❌ No se pudo abrir boleta')
+        logger.warning('Loop AUTO fallo')
     
     return app, main_window
 

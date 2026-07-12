@@ -94,6 +94,107 @@ def find_auto_row(table: WindowSpecification, timeout: int = 10) -> Optional[Win
     return None
 
 
+def process_auto_queue_loop(main_window, app, auto_count, timeout=40):
+    """
+    Procesa N boletas de la cola AUTO en loop:
+    - Iteracion 1: Click AUTO + Ctrl+G + Alt+G (una vez) -> esperar boleta -> Ctrl+L -> 5s
+    - Iteraciones 2..N: esperar cambio de titulo -> Ctrl+L -> 5s
+    - Al final: cerrar app
+    """
+    logger.info('=== LOOP AUTO: Procesando {} boletas ==='.format(auto_count))
+    
+    table = find_queue_table(main_window, timeout=15)
+    if not table:
+        logger.error('No se pudo encontrar la tabla de colas')
+        return False
+    
+    auto_row = find_auto_row(table, timeout=10)
+    if not auto_row:
+        logger.error('No se encontro la fila AUTO')
+        return False
+    
+    try:
+        logger.info('Click izquierdo en fila AUTO...')
+        if not click_row(auto_row, button="left"):
+            logger.error('Fallo click izquierdo en fila AUTO')
+            return False
+        
+        import time
+        time.sleep(0.5)
+        
+        logger.info('Enviando Ctrl+G para abrir primera boleta...')
+        try:
+            auto_row.type_keys('^g')
+        except Exception as e:
+            logger.error('Fallo envio de Ctrl+G: {}'.format(e))
+            return False
+        
+        time.sleep(0.5)
+        
+        logger.info('Enviando Alt+G para carga automatica de lotes...')
+        try:
+            # Enviar Alt+G a la ventana principal (app level) porque el foco cambia tras Ctrl+G
+            main_window.type_keys('%g')
+        except Exception as e:
+            logger.error('Fallo envio de Alt+G: {}'.format(e))
+            return False
+        
+        boleta_window = None
+        
+        for i in range(auto_count):
+            if i == 0:
+                logger.info('Procesando boleta 1/{} (primera)'.format(auto_count))
+                try:
+                    boleta_window = wait_for_title_change_pattern(app, BOLETA_TITLE_PATTERN, timeout=timeout, exclude_handles=[])
+                    logger.info('Primera boleta cargada: "{}"'.format(boleta_window.window_text()))
+                except WindowNotFoundError:
+                    logger.warning('Titulo no cambio al patron esperado, verificando ventana principal...')
+                    main_title = main_window.window_text()
+                    import re
+                    if re.search(BOLETA_TITLE_PATTERN, main_title, re.IGNORECASE):
+                        logger.info('Primera boleta ya cargada: "{}"'.format(main_title))
+                        boleta_window = main_window
+                    else:
+                        logger.error('No se detecto carga de primera boleta')
+                        return False
+            else:
+                logger.info('Procesando boleta {}/{}'.format(i+1, auto_count))
+                try:
+                    boleta_window = wait_for_title_change_pattern(app, BOLETA_TITLE_PATTERN, timeout=timeout, exclude_handles=[])
+                    logger.info('Boleta {} cargada: "{}"'.format(i+1, boleta_window.window_text()))
+                except WindowNotFoundError:
+                    logger.error('No se detecto carga de boleta {}'.format(i+1))
+                    return False
+            
+            logger.info('Enviando Ctrl+L en boleta {}...'.format(i+1))
+            try:
+                boleta_window.type_keys('^l')
+                logger.info('Ctrl+L enviado en boleta {}'.format(i+1))
+            except Exception as e:
+                logger.error('Fallo Ctrl+L en boleta {}: {}'.format(i+1, e))
+                return False
+            
+            logger.info('Esperando 5 segundos...')
+            time.sleep(5)
+        
+        logger.info('Loop completado. Cerrando aplicacion...')
+        try:
+            boleta_window.close()
+            logger.info('Aplicacion cerrada')
+        except Exception as e:
+            logger.warning('Error cerrando app: {}'.format(e))
+            try:
+                boleta_window.type_keys('%{F4}')
+            except Exception:
+                pass
+        
+        return True
+        
+    except Exception as e:
+        logger.error('Error en loop AUTO: {}'.format(e))
+        return False
+
+
 def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: Application, timeout: int = 40) -> Optional[WindowSpecification]:
     '''
     Click fila AUTO + Ctrl+G para abrir PRIMERA boleta.
@@ -110,6 +211,11 @@ def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: App
     if not auto_row:
         logger.error('No se encontr\u00f3 la fila AUTO')
         return None
+    
+    # === NUEVO PASO 4: Leer recuento de AUTO (columna 3) ===
+    recuento_text = get_cell_text(auto_row, 3)
+    logger.info(f'Cantidad de AUTO (Recuento tareas con forma): {recuento_text}')
+    print(f'Cantidad de AUTO: {recuento_text}')
     
     # Click IZQUIERDO en la fila AUTO (selecciona, fondo azul)
     logger.info('Click izquierdo en fila AUTO...')

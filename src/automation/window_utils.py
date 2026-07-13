@@ -1,8 +1,11 @@
 ﻿import re
 import time
+import logging
 from typing import Optional, Dict, Any, List, Tuple
 from pywinauto import Application, WindowSpecification
 from pywinauto.timings import TimeoutError as PywinautoTimeoutError
+
+logger = logging.getLogger(__name__)
 
 
 class WindowNotFoundError(Exception):
@@ -453,3 +456,286 @@ def wait_for_window_close(window: WindowSpecification, timeout: int = 10) -> boo
             return True
         time.sleep(0.5)
     return False
+
+
+def detect_error_modal(app: Application, main_window: WindowSpecification = None) -> tuple:
+    """
+    Detecta si hay un modal de error abierto.
+    Título esperado exacto: 'ABBYY FlexiCapture 12 (Estación de verificación)'
+    El modal es un diálogo con botones Sí/No/Cancelar.
+    Retorna (True, modal_window) si se encuentra, (False, None) si no.
+    """
+    try:
+        # Buscar en ventanas top-level de la app
+        logger.info(f"DEBUG detect_error_modal: Checking {len(app.windows())} top-level windows")
+        for window in app.windows():
+            try:
+                title = window.window_text()
+                logger.info(f"DEBUG: Checking window: '{title}' (len={len(title)})")
+                # El modal tiene título EXACTO sin prefijo http://
+                if title == 'ABBYY FlexiCapture 12 (Estación de verificación)' or \
+                   (not title.startswith('http://') and 'ABBYY FlexiCapture 12' in title and 'Estación de verificación' in title and len(title) < 60):
+                    # Verificar que tiene botones Sí/No/Cancelar
+                    buttons = []
+                    for child in window.descendants():
+                        try:
+                            if child.element_info.control_type and child.element_info.control_type.lower() == 'button':
+                                text = child.window_text().strip().lower()
+                                if text in ('sí', 'si', 'yes', 'no', 'cancelar', 'cancel'):
+                                    buttons.append(text)
+                        except Exception:
+                            continue
+                    if len(buttons) >= 2:
+                        logger.info(f"Modal de error detectado: '{title}' - Botones: {buttons}")
+                        return True, window
+            except Exception as e:
+                logger.info(f"DEBUG: Error checking window: {e}")
+                continue
+        
+        # Si no se encontró en top-level, buscar en hijos de la ventana principal
+        if main_window:
+            try:
+                for child in main_window.descendants():
+                    try:
+                        ctrl_type = child.element_info.control_type
+                        if ctrl_type and ctrl_type.lower() in ('window', 'dialog', 'pane'):
+                            title = child.window_text()
+                            if title == 'ABBYY FlexiCapture 12 (Estación de verificación)' or \
+                               (not title.startswith('http://') and 'ABBYY FlexiCapture 12' in title and 'Estación de verificación' in title and len(title) < 60):
+                                buttons = []
+                                for sub in child.descendants():
+                                    try:
+                                        if sub.element_info.control_type and sub.element_info.control_type.lower() == 'button':
+                                            text = sub.window_text().strip().lower()
+                                            if text in ('sí', 'si', 'yes', 'no', 'cancelar', 'cancel'):
+                                                buttons.append(text)
+                                    except Exception:
+                                        continue
+                                if len(buttons) >= 2:
+                                    logger.info(f"Modal de error detectado (hijo): '{title}' - Botones: {buttons}")
+                                    return True, child
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.info(f"DEBUG: Error searching children: {e}")
+    except Exception as e:
+        logger.info(f"Error detectando modal: {e}")
+    return False, None
+
+
+def click_cancelar_modal(modal: WindowSpecification) -> bool:
+    """Click en botón Cancelar del modal de error."""
+    try:
+        for child in modal.descendants():
+            try:
+                if child.element_info.control_type and child.element_info.control_type.lower() == 'button':
+                    text = child.window_text().strip().lower()
+                    if text in ('cancelar', 'cancel'):
+                        child.click()
+                        logger.info("Click en Cancelar del modal")
+                        return True
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"Error click Cancelar: {e}")
+    return False
+
+
+def click_80_percent_left(window: WindowSpecification) -> bool:
+    """
+    Click DERECHO en 20% desde la izquierda (80% desde borde izquierdo, 50% desde arriba).
+    Es un click DERECHO para abrir el menú contextual con 'Fases disponibles'.
+    """
+    try:
+        rect = window.rectangle()
+        x = rect.left + int(rect.width() * 0.2)
+        y = rect.top + int(rect.height() * 0.5)
+        window.click_input(button='right', coords=(x, y))
+        logger.info(f"Click DERECHO 80% izquierda en ({x}, {y})")
+        return True
+    except Exception as e:
+        logger.error(f"Error click DERECHO 80% izquierda: {e}")
+        return False
+
+
+def select_fase_verificacion_javier(window: WindowSpecification) -> bool:
+    """
+    Flujo correcto (click DERECHO abre menú 'Contexto'):
+    1. El menú contextual 'Contexto' ya está abierto (se abrió con click derecho)
+    2. Click IZQUIERDO en 'Enviar a etapa' en el menú
+    3. Se abre ventana hija 'Enviar tarea a etapa'
+    4. En esa ventana: buscar 'Fases disponibles' -> click 'Verificación Javier' -> Click 'Aceptar'
+    """
+    try:
+        logger.info("DEBUG: Buscando menú contextual 'Contexto' y opción 'Enviar a etapa'...")
+        
+        # Buscar en ventanas top-level (popup menus) el menú "Contexto"
+        from pywinauto import Application
+        app = Application(backend='uia').connect(handle=window.handle)
+        
+        # Buscar el menú contextual "Contexto"
+        for popup in app.windows():
+            try:
+                title = popup.window_text()
+                ctrl_type = popup.element_info.control_type
+                logger.info(f"DEBUG: Ventana popup: '{title}' type={ctrl_type}")
+                
+                if ctrl_type and ctrl_type.lower() in ('menu', 'popup') and title:
+                    logger.info(f"DEBUG: Popup menu encontrado: '{title}' type={ctrl_type}")
+                    
+                    # Buscar "Enviar a etapa" en el menú
+                    for child in popup.descendants():
+                        try:
+                            text = child.window_text().strip()
+                            if 'enviar' in text.lower() and 'etapa' in text.lower():
+                                logger.info(f"Encontrado 'Enviar a etapa': '{child.window_text()}'")
+                                # Click IZQUIERDO en "Enviar a etapa"
+                                child.click_input()
+                                logger.info("Click IZQUIERDO en 'Enviar a etapa'")
+                                time.sleep(0.5)
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        
+        # Esperar a que se abra la ventana hija "Enviar tarea a etapa"
+        time.sleep(0.5)
+        
+# Buscar la ventana hija "Enviar tarea a etapa" - buscar ventana distinta a main_window
+        enviar_window = None
+        for w in app.windows():
+            try:
+                title = w.window_text()
+                # Buscar ventana que no sea la main_window y que parezca un diálogo (sin http://)
+                # y que tenga palabras clave de "enviar" o "etapa" o "tarea"
+                if w.handle != window.handle and title:
+                    if not title.startswith('http://'):
+                        logger.info(f"  Ventana candidata: '{title}' type={w.element_info.control_type}")
+                        # Aceptar cualquier ventana hija que no sea la main y no tenga http://
+                        enviar_window = w
+                        logger.info(f"Ventana hija encontrada: '{title}'")
+                        break
+            except Exception:
+                continue
+        
+        if not enviar_window:
+            logger.warning("Ventana 'Enviar tarea a etapa' no encontrada en app.windows()")
+            # Buscar en hijos de la ventana principal
+            logger.info("Buscando en hijos de la ventana principal...")
+            for child in window.descendants():
+                try:
+                    title = child.window_text()
+                    ctrl_type = child.element_info.control_type
+                    if title and ctrl_type and ctrl_type.lower() in ('window', 'dialog', 'pane'):
+                        logger.info(f"  Hijo candidato: '{title}' type={ctrl_type}")
+                        if title == 'Enviar tarea a etapa':
+                            enviar_window = child
+                            logger.info(f"Ventana hija encontrada: '{title}'")
+                            break
+                except Exception:
+                    pass
+            
+            # Debug: listar TODAS las ventanas en app.windows()
+            logger.info("DEBUG: Todas las ventanas en app.windows():")
+            for w in app.windows():
+                try:
+                    logger.info(f"  app.window: handle={w.handle} title='{w.window_text()}' type={w.element_info.control_type} class={w.class_name()} rect={w.rectangle()}")
+                except Exception:
+                    pass
+            
+            if not enviar_window:
+                return False
+        
+        logger.info("Ventana 'Enviar tarea a etapa' encontrada, buscando 'Fases disponibles'...")
+        
+        # En la ventana "Enviar tarea a etapa", buscar "Fases disponibles"
+        combo = None
+        for child in enviar_window.descendants():
+            try:
+                ctrl_type = child.element_info.control_type
+                text = child.window_text().strip().lower()
+                if ctrl_type and ctrl_type.lower() in ('combobox', 'combo', 'splitbutton', 'button', 'menu', 'splitbuttondropdown', 'list'):
+                    if 'fase' in text and 'disponible' in text:
+                        combo = child
+                        logger.info(f"ComboBox 'Fases disponibles' encontrado: {child.window_text()}")
+                        break
+            except Exception:
+                continue
+        
+        if not combo:
+            # Buscar por texto en hijos
+            for child in enviar_window.descendants():
+                try:
+                    text = child.window_text().strip().lower()
+                    if 'fase' in text and 'disponible' in text:
+                        parent = child.parent()
+                        if parent:
+                            ctrl_type = parent.element_info.control_type
+                            if ctrl_type and ctrl_type.lower() in ('combobox', 'combo', 'list'):
+                                combo = parent
+                                logger.info(f"ComboBox 'Fases disponibles' encontrado via hijo: {parent.window_text()}")
+                                break
+                except Exception:
+                    continue
+        
+        if not combo:
+            logger.warning("ComboBox 'Fases disponibles' no encontrado en ventana 'Enviar tarea a etapa'")
+            # Debug: listar controles
+            for child in enviar_window.descendants():
+                try:
+                    ctrl_type = child.element_info.control_type
+                    text = child.window_text().strip()
+                    if ctrl_type and text:
+                        logger.info(f"DEBUG EnviarWindow: type={ctrl_type}, text='{text[:80]}'")
+                except Exception:
+                    continue
+            return False
+        
+        # Click para expandir
+        combo.click_input()
+        time.sleep(0.5)
+        
+        # Buscar item "Verificación Javier"
+        item_found = False
+        for child in combo.descendants():
+            try:
+                text = child.window_text().strip().lower()
+                if 'verificación' in text and 'javier' in text:
+                    child.click_input()
+                    logger.info(f"Seleccionado: {child.window_text()}")
+                    item_found = True
+                    break
+            except Exception:
+                continue
+        
+        if not item_found:
+            try:
+                combo.type_keys('verificacion javier')
+                time.sleep(0.5)
+                combo.type_keys('{ENTER}')
+                logger.info("Seleccionado via type_keys")
+            except Exception:
+                logger.warning("No se pudo seleccionar 'Verificación Javier'")
+                return False
+        
+        time.sleep(0.5)
+        
+        # Click en botón Aceptar en la ventana "Enviar tarea a etapa"
+        for child in enviar_window.descendants():
+            try:
+                if child.element_info.control_type and child.element_info.control_type.lower() == 'button':
+                    text = child.window_text().strip().lower()
+                    if text in ('aceptar', 'ok', 'accept'):
+                        child.click()
+                        logger.info("Click en Aceptar en ventana 'Enviar tarea a etapa'")
+                        return True
+            except Exception:
+                continue
+        
+        logger.warning("Botón Aceptar no encontrado en ventana 'Enviar tarea a etapa'")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error seleccionando fase: {e}")
+        return False

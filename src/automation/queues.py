@@ -9,7 +9,8 @@ from .window_utils import (
     wait_for_title_change_pattern, WindowNotFoundError, ButtonNotFoundError,
     find_table, find_boleta_table, get_table_rows_with_cells,
     get_cell_object, is_cell_green_verified, wait_for_boleta_load,
-    get_cell_font_color, BOLETA_TITLE_PATTERN
+    get_cell_font_color, BOLETA_TITLE_PATTERN,
+    detect_error_modal, click_cancelar_modal, click_80_percent_left, select_fase_verificacion_javier
 )
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,7 @@ def find_auto_row(table: WindowSpecification, timeout: int = 10) -> Optional[Win
     return None
 
 
-def process_auto_queue_loop(main_window, app, auto_count, timeout=40):
+def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
     """
     Procesa N boletas de la cola AUTO en loop:
     - Iteracion 1: Click AUTO + Ctrl+G + Alt+G (una vez) -> esperar boleta -> Ctrl+L -> 5s
@@ -166,6 +167,35 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=40):
                     logger.error('No se detecto carga de boleta {}'.format(i+1))
                     return False
             
+            # ===== NUEVO: Detectar y manejar modal de error =====
+            logger.info(f"DEBUG: Verificando modal de error en boleta {i+1}")
+            error_detected, error_modal = detect_error_modal(app, main_window)
+            logger.info(f"DEBUG: detect_error_modal returned: error_detected={error_detected}")
+            if error_detected:
+                logger.info('Modal de error detectado en boleta {} - manejando...'.format(i+1))
+                
+                # 1. Click en Cancelar en el modal
+                if not click_cancelar_modal(error_modal):
+                    logger.error('No se pudo hacer click en Cancelar')
+                    return False
+                time.sleep(0.5)
+                
+                # 2. Click en 80% izquierda (evita boletas centradas)
+                if not click_80_percent_left(boleta_window):
+                    logger.error('No se pudo hacer click 80% izquierda')
+                    return False
+                time.sleep(0.5)
+                
+                # 3. Seleccionar "Verificación Javier" en ComboBox "Fases disponibles" + Aceptar
+                if not select_fase_verificacion_javier(boleta_window):
+                    logger.error('No se pudo seleccionar Verificación Javier')
+                    return False
+                time.sleep(1)
+                
+                logger.info('Boleta con error procesada, continuando al siguiente lote')
+                continue  # Pasar al siguiente lote
+            # =====================================================
+            
             logger.info('Enviando Ctrl+L en boleta {}...'.format(i+1))
             try:
                 boleta_window.type_keys('^l')
@@ -174,8 +204,8 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=40):
                 logger.error('Fallo Ctrl+L en boleta {}: {}'.format(i+1, e))
                 return False
             
-            logger.info('Esperando 5 segundos...')
-            time.sleep(5)
+            logger.info('Esperando 1 segundo...')
+            time.sleep(1)
         
         logger.info('Loop completado. Cerrando aplicacion...')
         try:

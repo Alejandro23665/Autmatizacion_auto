@@ -101,18 +101,29 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
     - Iteracion 1: Click AUTO + Ctrl+G + Alt+G (una vez) -> esperar boleta -> Ctrl+L -> 5s
     - Iteraciones 2..N: esperar cambio de titulo -> Ctrl+L -> 5s
     - Al final: cerrar app
+    
+    Returns:
+        (success: bool, count: int) - success indicates if completed, count is the number of AUTO detected
     """
     logger.info('=== LOOP AUTO: Procesando {} boletas ==='.format(auto_count))
     
     table = find_queue_table(main_window, timeout=15)
     if not table:
         logger.error('No se pudo encontrar la tabla de colas')
-        return False
+        return False, 0
     
     auto_row = find_auto_row(table, timeout=10)
     if not auto_row:
         logger.error('No se encontro la fila AUTO')
-        return False
+        return False, 0
+    
+    # Get the count from column 3
+    count_text = get_cell_text(auto_row, 3)
+    logger.info('Cantidad de AUTO detectada: {}'.format(count_text))
+    try:
+        detected_count = int(count_text.strip())
+    except:
+        detected_count = auto_count
     
     try:
         logger.info('Click izquierdo en fila AUTO...')
@@ -218,11 +229,11 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
             except Exception:
                 pass
         
-        return True
+        return True, detected_count
         
     except Exception as e:
         logger.error('Error en loop AUTO: {}'.format(e))
-        return False
+        return False, detected_count
 
 
 def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: Application, timeout: int = 40) -> Optional[WindowSpecification]:

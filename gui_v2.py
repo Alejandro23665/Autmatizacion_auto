@@ -6,8 +6,20 @@ import os
 import queue
 import time
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Add src to path - works for both development and bundled (PyInstaller) modes
+def get_base_path():
+    """Get base path for both development and PyInstaller bundle"""
+    if getattr(sys, 'frozen', False):
+        # Running in PyInstaller bundle
+        return sys._MEIPASS
+    else:
+        # Running in development
+        return os.path.dirname(os.path.abspath(__file__))
+
+BASE_PATH = get_base_path()
+SRC_PATH = os.path.join(BASE_PATH, 'src')
+if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
 
 from automation.launch_app import launch_verification_station
 from automation.queues import process_auto_queue_loop, find_queue_table, find_auto_row, get_cell_text
@@ -112,7 +124,14 @@ class AutoGUI:
         self.root.after(0, lambda: self.status_var.set(status))
         
     def update_count(self, count):
-        self.root.after(0, lambda: self.count_var.set(f"Boletas AUTO: {count}"))
+        self.root.after(0, lambda: self._set_count(count))
+        
+    def _set_count(self, count):
+        """Internal method to set count and force UI update"""
+        self.count_var.set(f"Boletas AUTO: {count}")
+        # Force UI update
+        self.count_label.update_idletasks()
+        self.root.update_idletasks()
         
     def run_automation(self):
         """Run the automation workflow"""
@@ -161,9 +180,10 @@ class AutoGUI:
             self.update_status("Procesando boletas...")
             self.log("Iniciando loop de procesamiento...")
             
-            success = process_auto_queue_loop(main_window, app, 1000, timeout=120)
+            success, detected_count = process_auto_queue_loop(main_window, app, 1000, timeout=120)
             
             if success:
+                self.update_count(detected_count)
                 self.root.after(0, lambda: self.status_var.set("Completado exitosamente"))
                 self.log("Automatización completada exitosamente")
             else:
@@ -185,7 +205,12 @@ class AutoGUI:
         if self.is_running:
             self.status_var.set("Completado")
         else:
-            self.status_var.set("Finalizado")
+            # Keep the count visible, just update status
+            current_count = self.count_var.get()
+            if "Boletas AUTO: --" in current_count:
+                self.status_var.set("Finalizado (sin datos de cantidad)")
+            else:
+                self.status_var.set(f"Finalizado - {current_count}")
         self.progress.stop()
 
 

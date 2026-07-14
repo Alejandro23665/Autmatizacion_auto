@@ -56,7 +56,7 @@ class AutoGUI:
         self.status_label.pack(anchor=tk.W)
         
         # Count display
-        self.count_var = tk.StringVar(value="Boletas AUTO: --")
+        self.count_var = tk.StringVar(value=f"Boletas AUTO: --")
         self.count_label = ttk.Label(info_frame, textvariable=self.count_var, font=("Arial", 12, "bold"), foreground="blue")
         self.count_label.pack(anchor=tk.W, pady=(5, 0))
         
@@ -108,7 +108,7 @@ class AutoGUI:
         self.stop_btn.config(state=tk.NORMAL)
         self.progress.start(10)
         self.status_var.set("Iniciando...")
-        self.count_var.set("Boletas AUTO: --")
+        self.count_var.set("Boletas AUTO")
         self.log("Iniciando automatización...")
         
         self.automation_thread = threading.Thread(target=self.run_automation, daemon=True)
@@ -163,7 +163,7 @@ class AutoGUI:
                 
             # Get count from column 3
             count_text = get_cell_text(auto_row, 3)
-            self.log(f"Cantidad de AUTO detectada: {count_text}")
+            self.update_status(f"Cantidad de AUTO detectada: {count_text}")
             
             try:
                 count = int(count_text.strip())

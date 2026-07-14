@@ -107,12 +107,12 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
     """
     logger.info('=== LOOP AUTO: Procesando {} boletas ==='.format(auto_count))
     
-    table = find_queue_table(main_window, timeout=15)
+    table = find_queue_table(main_window, timeout=3)
     if not table:
         logger.error('No se pudo encontrar la tabla de colas')
         return False, 0
     
-    auto_row = find_auto_row(table, timeout=10)
+    auto_row = find_auto_row(table, timeout=3)
     if not auto_row:
         logger.error('No se encontro la fila AUTO')
         return False, 0
@@ -153,7 +153,7 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
         
         boleta_window = None
         
-        for i in range(auto_count):
+        for i in range(auto_count + 1):
             if i == 0:
                 logger.info('Procesando boleta 1/{} (primera)'.format(auto_count))
                 try:
@@ -201,7 +201,7 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
                 if not select_fase_verificacion_javier(boleta_window):
                     logger.error('No se pudo seleccionar Verificación Javier')
                     return False
-                time.sleep(1)
+                time.sleep(0.5)
                 
                 logger.info('Boleta con error procesada, continuando al siguiente lote')
                 continue  # Pasar al siguiente lote
@@ -215,8 +215,8 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
                 logger.error('Fallo Ctrl+L en boleta {}: {}'.format(i+1, e))
                 return False
             
-            logger.info('Esperando 1 segundo...')
-            time.sleep(1)
+            logger.info('Esperando 0.5 segundo...')
+            time.sleep(0.5)
         
         logger.info('Loop completado. Cerrando aplicacion...')
         try:
@@ -236,19 +236,19 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
         return False, detected_count
 
 
-def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: Application, timeout: int = 40) -> Optional[WindowSpecification]:
+def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: Application, timeout: int = 10) -> Optional[WindowSpecification]:
     '''
     Click fila AUTO + Ctrl+G para abrir PRIMERA boleta.
     Retorna la ventana principal con t\u00edtulo actualizado (misma ventana).
     '''
     logger.info('=== Seleccionando cola AUTO y abriendo primera boleta ===')
     
-    table = find_queue_table(main_window, timeout=15)
+    table = find_queue_table(main_window, timeout=1.5)
     if not table:
         logger.error('No se pudo encontrar la tabla de colas')
         return None
     
-    auto_row = find_auto_row(table, timeout=10)
+    auto_row = find_auto_row(table, timeout=1.5)
     if not auto_row:
         logger.error('No se encontr\u00f3 la fila AUTO')
         return None
@@ -309,7 +309,7 @@ def post_boleta_action(boleta_window: WindowSpecification) -> bool:
         logger.info('Ctrl+L enviado')
         
         logger.info('Esperando 10 segundos...')
-        time.sleep(10)
+        time.sleep(3)
         
         logger.info('Cerrando aplicaci\u00f3n...')
         boleta_window.close()

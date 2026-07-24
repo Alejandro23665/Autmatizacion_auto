@@ -180,7 +180,7 @@ class AutoGUI:
             self.update_status("Procesando boletas...")
             self.log("Iniciando loop de procesamiento...")
             
-            success, detected_count = process_auto_queue_loop(main_window, app, 1000, timeout=120)
+            success, detected_count = process_auto_queue_loop(main_window, app, timeout=120)
             
             if success:
                 self.update_count(detected_count)

@@ -16,6 +16,11 @@ class ButtonNotFoundError(Exception):
     pass
 
 
+class UIStateTimeoutError(Exception):
+    """Excepción para timeouts esperando estados de UI"""
+    pass
+
+
 # Patr\u00f3n simplificado sin acentos problem\u00e1ticos
 BOLETA_TITLE_PATTERN = r'Proyecto_Consorcio.*FlexiCapture 12.*Estaci.n de verificaci.n.*\d{2}-\d{2}-\d{4}_\d+'
 
@@ -739,3 +744,469 @@ def select_fase_verificacion_javier(window: WindowSpecification) -> bool:
     except Exception as e:
         logger.error(f"Error seleccionando fase: {e}")
         return False
+
+
+# ===== NUEVAS FUNCIONES DE ESPERA CONDICIONAL (Opción A) =====
+
+def wait_for_row_selected(row: WindowSpecification, timeout: int = 15, poll_interval: float = 0.2) -> bool:
+    """
+    Espera a que una fila de tabla esté seleccionada (resaltada/fondo azul).
+    Heurísticas probadas en orden:
+    1. Propiedad is_selected (UIA)
+    2. Selección en parent table (SelectionItemPattern)
+    3. Cambio de color de fondo (via get_cell_font_color en primera celda)
+    4. Foco en la fila
+    """
+    start = time.time()
+    logger.info(f"Esperando selección de fila (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            # 1. Verificar is_selected via element_info
+            try:
+                if hasattr(row.element_info, 'is_selected') and row.element_info.is_selected:
+                    logger.info("Fila seleccionada detectada (is_selected=True)")
+                    return True
+            except Exception:
+                pass
+            
+            # 2. Verificar via SelectionItemPattern si está disponible
+            try:
+                pattern = row.element_info.get_selection_item_pattern()
+                if pattern and pattern.is_selected:
+                    logger.info("Fila seleccionada detectada (SelectionItemPattern)")
+                    return True
+            except Exception:
+                pass
+            
+            # 3. Verificar foco (a menudo la fila seleccionada tiene foco)
+            try:
+                if row.has_focus():
+                    logger.info("Fila seleccionada detectada (has_focus=True)")
+                    return True
+            except Exception:
+                pass
+            
+            # 4. Verificar si la primera celda tiene color de selección (azul)
+            try:
+                cell = get_cell_object(row, 0)
+                if cell:
+                    color = get_cell_font_color(cell)
+                    # En ABBYY, fila seleccionada suele tener texto blanco sobre fondo azul
+                    # o fondo azul detectable via font color
+                    if color and color[2] > 150:  # componente azul alto
+                        logger.info(f"Fila seleccionada detectada (color azul en celda: {color})")
+                        return True
+            except Exception:
+                pass
+            
+            # 5. Verificar state via element_info (UIA SelectionItem state)
+            try:
+                if hasattr(row.element_info, 'selection_item_state'):
+                    state = row.element_info.selection_item_state
+                    if state and state != 'none':
+                        logger.info(f"Fila seleccionada detectada (selection_item_state={state})")
+                        return True
+            except Exception:
+                pass
+                
+        except Exception as e:
+            logger.debug(f"Error comprobando selección: {e}")
+        
+        time.sleep(poll_interval)
+    
+    logger.warning(f"Timeout esperando selección de fila tras {timeout}s")
+    raise UIStateTimeoutError(f"Fila no se seleccionó en {timeout}s")
+
+
+def wait_for_boleta_window(app: Application, pattern_re: str, timeout: int = 60, 
+                           exclude_handles: list = None, poll_interval: float = 0.3) -> WindowSpecification:
+    """
+    Espera a que aparezca una ventana de boleta (título matching pattern).
+    Versión mejorada de wait_for_title_change_pattern con polling más rápido.
+    """
+    if exclude_handles is None:
+        exclude_handles = []
+    
+    pattern = re.compile(pattern_re, re.IGNORECASE)
+    start = time.time()
+    logger.info(f"Esperando ventana boleta (pattern={pattern_re}, timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            for window in app.windows():
+                try:
+                    if window.handle in exclude_handles:
+                        continue
+                    title = window.window_text()
+                    if pattern.search(title):
+                        logger.info(f"Ventana boleta detectada: '{title}'")
+                        return window
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+    
+    raise WindowNotFoundError(f'Ventana boleta con patrón \'{pattern_re}\' no apareció en {timeout}s')
+
+
+def wait_for_ctrl_l_processed(current_boleta_window: WindowSpecification, app: Application,
+                               pattern_re: str, timeout: int = 45, poll_interval: float = 0.3) -> Optional[WindowSpecification]:
+    """
+    Espera a que Ctrl+L procese la boleta actual.
+    Señales de éxito:
+    - La ventana actual cierra/cambia
+    - Aparece nueva ventana con pattern de boleta (siguiente)
+    - O vuelve a la ventana principal (cola)
+    Retorna la nueva ventana de boleta si hay siguiente, o None si terminó.
+    """
+    start = time.time()
+    current_handle = current_boleta_window.handle
+    current_title = ""
+    try:
+        current_title = current_boleta_window.window_text()
+    except Exception:
+        pass
+    
+    pattern = re.compile(pattern_re, re.IGNORECASE)
+    logger.info(f"Esperando procesamiento Ctrl+L (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            # 1. Verificar si la ventana actual ya no existe (cerrada)
+            try:
+                if not current_boleta_window.exists():
+                    logger.info("Ventana boleta anterior cerrada tras Ctrl+L")
+                    break
+            except Exception:
+                logger.info("Ventana boleta anterior ya no existe")
+                break
+            
+            # 2. Buscar nueva ventana boleta (diferente handle, matching pattern)
+            for window in app.windows():
+                try:
+                    if window.handle == current_handle:
+                        continue
+                    if window.handle in [current_handle]:  # exclude current
+                        continue
+                    title = window.window_text()
+                    if pattern.search(title):
+                        logger.info(f"Nueva boleta detectada tras Ctrl+L: '{title}'")
+                        return window
+                except Exception:
+                    continue
+            
+            # 3. Verificar si volvió a la ventana principal (sin pattern de boleta)
+            #    - en ese caso puede que no haya más boletas
+            for window in app.windows():
+                try:
+                    if window.handle == current_handle:
+                        continue
+                    title = window.window_text()
+                    if not pattern.search(title) and 'FlexiCapture' in title and 'Estaci' in title:
+                        # Ventana principal sin boleta cargada = cola vacía o fin
+                        logger.info(f"Ventana principal detectada (sin boleta): '{title}'")
+                        return None
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            logger.debug(f"Error en wait_for_ctrl_l_processed: {e}")
+        
+        time.sleep(poll_interval)
+    
+    logger.warning(f"Timeout esperando procesamiento Ctrl+L tras {timeout}s")
+    raise UIStateTimeoutError(f"Ctrl+L no completó en {timeout}s")
+
+
+def wait_for_ui_state(check_func, timeout: int = 30, poll_interval: float = 0.2, 
+                      description: str = "estado UI") -> bool:
+    """
+    Espera genérica para cualquier condición de UI.
+    check_func: función que retorna True cuando el estado se cumple
+    """
+    start = time.time()
+    logger.info(f"Esperando {description} (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            if check_func():
+                logger.info(f"{description} alcanzado")
+                return True
+        except Exception as e:
+            logger.debug(f"Error comprobando {description}: {e}")
+        time.sleep(poll_interval)
+    
+    raise UIStateTimeoutError(f"{description} no alcanzado en {timeout}s")
+
+
+def wait_for_alt_g_loaded(main_window: WindowSpecification, app: Application,
+                           pattern_re: str, timeout: int = 60, poll_interval: float = 0.3) -> WindowSpecification:
+    """
+    Espera específica tras Alt+G (carga automática de lotes).
+    Alt+G dispara carga en background; esperamos a que la PRIMERA boleta aparezca.
+    """
+    pattern = re.compile(pattern_re, re.IGNORECASE)
+    start = time.time()
+    logger.info(f"Esperando primera boleta tras Alt+G (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            for window in app.windows():
+                try:
+                    if window.handle == main_window.handle:
+                        continue
+                    title = window.window_text()
+                    if pattern.search(title):
+                        logger.info(f"Primera boleta cargada tras Alt+G: '{title}'")
+                        return window
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+    
+    # Fallback: verificar si main_window ya cambió a boleta
+    try:
+        main_title = main_window.window_text()
+        if pattern.search(main_title):
+            logger.info(f"Primera boleta ya en main_window tras Alt+G: '{main_title}'")
+            return main_window
+    except Exception:
+        pass
+    
+    raise WindowNotFoundError(f'Primera boleta no apareció tras Alt+G en {timeout}s')
+
+
+# ===== NUEVAS FUNCIONES DE ESPERA CONDICIONAL (Opción A) =====
+
+def wait_for_row_selected(row: WindowSpecification, timeout: int = 15, poll_interval: float = 0.2) -> bool:
+    """
+    Espera a que una fila de tabla esté seleccionada (resaltada/fondo azul).
+    Heurísticas probadas en orden:
+    1. Propiedad is_selected (UIA)
+    2. Selección en parent table (SelectionItemPattern)
+    3. Cambio de color de fondo (via get_cell_font_color en primera celda)
+    4. Foco en la fila
+    """
+    start = time.time()
+    logger.info(f"Esperando selección de fila (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            # 1. Verificar is_selected via element_info
+            try:
+                if hasattr(row.element_info, 'is_selected') and row.element_info.is_selected:
+                    logger.info("Fila seleccionada detectada (is_selected=True)")
+                    return True
+            except Exception:
+                pass
+            
+            # 2. Verificar via SelectionItemPattern si está disponible
+            try:
+                pattern = row.element_info.get_selection_item_pattern()
+                if pattern and pattern.is_selected:
+                    logger.info("Fila seleccionada detectada (SelectionItemPattern)")
+                    return True
+            except Exception:
+                pass
+            
+            # 3. Verificar foco (a menudo la fila seleccionada tiene foco)
+            try:
+                if row.has_focus():
+                    logger.info("Fila seleccionada detectada (has_focus=True)")
+                    return True
+            except Exception:
+                pass
+            
+            # 4. Verificar si la primera celda tiene color de selección (azul)
+            try:
+                cell = get_cell_object(row, 0)
+                if cell:
+                    color = get_cell_font_color(cell)
+                    # En ABBYY, fila seleccionada suele tener texto blanco sobre fondo azul
+                    # o fondo azul detectable via font color
+                    if color and color[2] > 150:  # componente azul alto
+                        logger.info(f"Fila seleccionada detectada (color azul en celda: {color})")
+                        return True
+            except Exception:
+                pass
+            
+            # 5. Verificar state via element_info (UIA SelectionItem state)
+            try:
+                if hasattr(row.element_info, 'selection_item_state'):
+                    state = row.element_info.selection_item_state
+                    if state and state != 'none':
+                        logger.info(f"Fila seleccionada detectada (selection_item_state={state})")
+                        return True
+            except Exception:
+                pass
+                
+        except Exception as e:
+            logger.debug(f"Error comprobando selección: {e}")
+        
+        time.sleep(poll_interval)
+    
+    logger.warning(f"Timeout esperando selección de fila tras {timeout}s")
+    raise UIStateTimeoutError(f"Fila no se seleccionó en {timeout}s")
+
+
+def wait_for_boleta_window(app: Application, pattern_re: str, timeout: int = 60, 
+                           exclude_handles: list = None, poll_interval: float = 0.3) -> WindowSpecification:
+    """
+    Espera a que aparezca una ventana de boleta (título matching pattern).
+    Versión mejorada de wait_for_title_change_pattern con polling más rápido.
+    """
+    if exclude_handles is None:
+        exclude_handles = []
+    
+    pattern = re.compile(pattern_re, re.IGNORECASE)
+    start = time.time()
+    logger.info(f"Esperando ventana boleta (pattern={pattern_re}, timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            for window in app.windows():
+                try:
+                    if window.handle in exclude_handles:
+                        continue
+                    title = window.window_text()
+                    if pattern.search(title):
+                        logger.info(f"Ventana boleta detectada: '{title}'")
+                        return window
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+    
+    raise WindowNotFoundError(f'Ventana boleta con patrón \'{pattern_re}\' no apareció en {timeout}s')
+
+
+def wait_for_ctrl_l_processed(current_boleta_window: WindowSpecification, app: Application,
+                               pattern_re: str, timeout: int = 45, poll_interval: float = 0.3) -> Optional[WindowSpecification]:
+    """
+    Espera a que Ctrl+L procese la boleta actual.
+    Señales de éxito:
+    - La ventana actual cierra/cambia
+    - Aparece nueva ventana con pattern de boleta (siguiente)
+    - O vuelve a la ventana principal (cola)
+    Retorna la nueva ventana de boleta si hay siguiente, o None si terminó.
+    """
+    start = time.time()
+    current_handle = current_boleta_window.handle
+    current_title = ""
+    try:
+        current_title = current_boleta_window.window_text()
+    except Exception:
+        pass
+    
+    pattern = re.compile(pattern_re, re.IGNORECASE)
+    logger.info(f"Esperando procesamiento Ctrl+L (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            # 1. Verificar si la ventana actual ya no existe (cerrada)
+            try:
+                if not current_boleta_window.exists():
+                    logger.info("Ventana boleta anterior cerrada tras Ctrl+L")
+                    break
+            except Exception:
+                logger.info("Ventana boleta anterior ya no existe")
+                break
+            
+            # 2. Buscar nueva ventana boleta (diferente handle, matching pattern)
+            for window in app.windows():
+                try:
+                    if window.handle == current_handle:
+                        continue
+                    if window.handle in [current_handle]:  # exclude current
+                        continue
+                    title = window.window_text()
+                    if pattern.search(title):
+                        logger.info(f"Nueva boleta detectada tras Ctrl+L: '{title}'")
+                        return window
+                except Exception:
+                    continue
+            
+            # 3. Verificar si volvió a la ventana principal (sin pattern de boleta)
+            #    - en ese caso puede que no haya más boletas
+            for window in app.windows():
+                try:
+                    if window.handle == current_handle:
+                        continue
+                    title = window.window_text()
+                    if not pattern.search(title) and 'FlexiCapture' in title and 'Estaci' in title:
+                        # Ventana principal sin boleta cargada = cola vacía o fin
+                        logger.info(f"Ventana principal detectada (sin boleta): '{title}'")
+                        return None
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            logger.debug(f"Error en wait_for_ctrl_l_processed: {e}")
+        
+        time.sleep(poll_interval)
+    
+    logger.warning(f"Timeout esperando procesamiento Ctrl+L tras {timeout}s")
+    raise UIStateTimeoutError(f"Ctrl+L no completó en {timeout}s")
+
+
+def wait_for_ui_state(check_func, timeout: int = 30, poll_interval: float = 0.2, 
+                      description: str = "estado UI") -> bool:
+    """
+    Espera genérica para cualquier condición de UI.
+    check_func: función que retorna True cuando el estado se cumple
+    """
+    start = time.time()
+    logger.info(f"Esperando {description} (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            if check_func():
+                logger.info(f"{description} alcanzado")
+                return True
+        except Exception as e:
+            logger.debug(f"Error comprobando {description}: {e}")
+        time.sleep(poll_interval)
+    
+    raise UIStateTimeoutError(f"{description} no alcanzado en {timeout}s")
+
+
+def wait_for_alt_g_loaded(main_window: WindowSpecification, app: Application,
+                           pattern_re: str, timeout: int = 60, poll_interval: float = 0.3) -> WindowSpecification:
+    """
+    Espera específica tras Alt+G (carga automática de lotes).
+    Alt+G dispara carga en background; esperamos a que la PRIMERA boleta aparezca.
+    """
+    pattern = re.compile(pattern_re, re.IGNORECASE)
+    start = time.time()
+    logger.info(f"Esperando primera boleta tras Alt+G (timeout={timeout}s)...")
+    
+    while time.time() - start < timeout:
+        try:
+            for window in app.windows():
+                try:
+                    if window.handle == main_window.handle:
+                        continue
+                    title = window.window_text()
+                    if pattern.search(title):
+                        logger.info(f"Primera boleta cargada tras Alt+G: '{title}'")
+                        return window
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+    
+    # Fallback: verificar si main_window ya cambió a boleta
+    try:
+        main_title = main_window.window_text()
+        if pattern.search(main_title):
+            logger.info(f"Primera boleta ya en main_window tras Alt+G: '{main_title}'")
+            return main_window
+    except Exception:
+        pass
+    
+    raise WindowNotFoundError(f'Primera boleta no apareció tras Alt+G en {timeout}s')

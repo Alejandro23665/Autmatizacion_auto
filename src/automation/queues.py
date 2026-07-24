@@ -10,7 +10,8 @@ from .window_utils import (
     find_table, find_boleta_table, get_table_rows_with_cells,
     get_cell_object, is_cell_green_verified, wait_for_boleta_load,
     get_cell_font_color, BOLETA_TITLE_PATTERN,
-    detect_error_modal, click_cancelar_modal, click_80_percent_left, select_fase_verificacion_javier
+    detect_error_modal, click_cancelar_modal, click_80_percent_left, select_fase_verificacion_javier,
+    wait_for_alt_g_loaded, wait_for_ctrl_l_processed, wait_for_ui_state, wait_for_row_selected
 )
 
 logger = logging.getLogger(__name__)
@@ -95,130 +96,135 @@ def find_auto_row(table: WindowSpecification, timeout: int = 10) -> Optional[Win
     return None
 
 
-def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
+def process_auto_queue_loop(main_window, app, timeout=120):
     """
     Procesa N boletas de la cola AUTO en loop:
-    - Iteracion 1: Click AUTO + Ctrl+G + Alt+G (una vez) -> esperar boleta -> Ctrl+L -> 5s
-    - Iteraciones 2..N: esperar cambio de titulo -> Ctrl+L -> 5s
+    - Leer tabla AUTO una vez (antes de click AUTO + Ctrl+G + Alt+G)
+    - Iteracion 1: Click AUTO + Ctrl+G + Alt+G -> esperar boleta -> Ctrl+L -> 0.5s
+    - Iteraciones 2..N: esperar cambio de titulo -> Ctrl+L -> 0.5s
+    - Si hay error modal: Cancelar -> 80% izq -> Verificación Javier + Aceptar -> NO incrementar i (reintento)
     - Al final: cerrar app
     
     Returns:
         (success: bool, count: int) - success indicates if completed, count is the number of AUTO detected
     """
-    logger.info('=== LOOP AUTO: Procesando {} boletas ==='.format(auto_count))
+    logger.info('=== LOOP AUTO: Iniciando ===')
     
-    table = find_queue_table(main_window, timeout=3)
+    # 1. Buscar tabla y fila AUTO
+    table = find_queue_table(main_window, timeout=15)
     if not table:
         logger.error('No se pudo encontrar la tabla de colas')
         return False, 0
     
-    auto_row = find_auto_row(table, timeout=3)
+    auto_row = find_auto_row(table, timeout=10)
     if not auto_row:
         logger.error('No se encontro la fila AUTO')
         return False, 0
     
-    # Get the count from column 3
+    # 2. LEER CANTIDAD DE AUTO UNA SOLA VEZ (columna 3) ANTES DE CLICK AUTO
     count_text = get_cell_text(auto_row, 3)
-    logger.info('Cantidad de AUTO detectada: {}'.format(count_text))
+    logger.info('Cantidad de AUTO detectada en tabla: {}'.format(count_text))
     try:
-        detected_count = int(count_text.strip())
+        total_boletas = int(count_text.strip())
     except:
-        detected_count = auto_count
+        logger.error('No se pudo parsear cantidad AUTO: {}'.format(count_text))
+        return False, 0
+    
+    if total_boletas <= 0:
+        logger.warning('Recuento AUTO es 0 o negativo, no hay boletas para procesar')
+        return True, 0
+    
+    logger.info('=== LOOP AUTO: Procesando {} boletas ==='.format(total_boletas))
     
     try:
+        # 3. Click AUTO + Ctrl+G + Alt+G (UNA VEZ al inicio)
         logger.info('Click izquierdo en fila AUTO...')
         if not click_row(auto_row, button="left"):
             logger.error('Fallo click izquierdo en fila AUTO')
-            return False
+            return False, 0
         
-        import time
-        time.sleep(0.5)
+        # Esperar a que la fila quede seleccionada (fondo azul)
+        wait_for_row_selected(auto_row, timeout=15)
         
         logger.info('Enviando Ctrl+G para abrir primera boleta...')
         try:
             auto_row.type_keys('^g')
         except Exception as e:
             logger.error('Fallo envio de Ctrl+G: {}'.format(e))
-            return False
+            return False, 0
         
-        time.sleep(0.5)
+        # Esperar a que aparezca ventana boleta tras Ctrl+G
+        boleta_window = wait_for_boleta_window(app, BOLETA_TITLE_PATTERN, timeout=30)
         
         logger.info('Enviando Alt+G para carga automatica de lotes...')
         try:
-            # Enviar Alt+G a la ventana principal (app level) porque el foco cambia tras Ctrl+G
             main_window.type_keys('%g')
         except Exception as e:
             logger.error('Fallo envio de Alt+G: {}'.format(e))
-            return False
+            return False, 0
         
-        boleta_window = None
+        # Esperar a que Alt+G cargue la PRIMERA boleta
+        boleta_window = wait_for_alt_g_loaded(main_window, app, BOLETA_TITLE_PATTERN, timeout=60)
+        i = 0
+        processed_count = 0
         
-        for i in range(auto_count + 1):
+        # 4. LOOP WHILE CON total_boletas FIJO - i SOLO INCREMENTA EN Ctrl+L EXITOSO
+        while i < total_boletas:
             if i == 0:
-                logger.info('Procesando boleta 1/{} (primera)'.format(auto_count))
-                try:
-                    boleta_window = wait_for_title_change_pattern(app, BOLETA_TITLE_PATTERN, timeout=timeout, exclude_handles=[])
-                    logger.info('Primera boleta cargada: "{}"'.format(boleta_window.window_text()))
-                except WindowNotFoundError:
-                    logger.warning('Titulo no cambio al patron esperado, verificando ventana principal...')
-                    main_title = main_window.window_text()
-                    import re
-                    if re.search(BOLETA_TITLE_PATTERN, main_title, re.IGNORECASE):
-                        logger.info('Primera boleta ya cargada: "{}"'.format(main_title))
-                        boleta_window = main_window
-                    else:
-                        logger.error('No se detecto carga de primera boleta')
-                        return False
+                logger.info('Procesando boleta 1/{} (primera)'.format(total_boletas))
+                # Primera boleta ya cargada tras wait_for_alt_g_loaded
+                logger.info('Primera boleta cargada: "{}"'.format(boleta_window.window_text()))
             else:
-                logger.info('Procesando boleta {}/{}'.format(i+1, auto_count))
-                try:
-                    boleta_window = wait_for_title_change_pattern(app, BOLETA_TITLE_PATTERN, timeout=timeout, exclude_handles=[])
-                    logger.info('Boleta {} cargada: "{}"'.format(i+1, boleta_window.window_text()))
-                except WindowNotFoundError:
-                    logger.error('No se detecto carga de boleta {}'.format(i+1))
-                    return False
+                logger.info('Procesando boleta {}/{}'.format(i+1, total_boletas))
+                # Esperar siguiente boleta tras Ctrl+L exitoso
+                boleta_window = wait_for_boleta_window(app, BOLETA_TITLE_PATTERN, timeout=timeout)
+                logger.info('Boleta {} cargada: "{}"'.format(i+1, boleta_window.window_text()))
             
-            # ===== NUEVO: Detectar y manejar modal de error =====
-            logger.info(f"DEBUG: Verificando modal de error en boleta {i+1}")
+            # ===== Detectar y manejar modal de error =====
+            logger.info('Verificando modal de error en boleta {}/{}'.format(i+1, total_boletas))
             error_detected, error_modal = detect_error_modal(app, main_window)
-            logger.info(f"DEBUG: detect_error_modal returned: error_detected={error_detected}")
+            logger.info('detect_error_modal returned: error_detected={}'.format(error_detected))
             if error_detected:
                 logger.info('Modal de error detectado en boleta {} - manejando...'.format(i+1))
                 
                 # 1. Click en Cancelar en el modal
                 if not click_cancelar_modal(error_modal):
                     logger.error('No se pudo hacer click en Cancelar')
-                    return False
-                time.sleep(0.5)
+                    return False, processed_count
                 
-                # 2. Click en 80% izquierda (evita boletas centradas)
+                # 2. Click en 80% izquierda (evita boletas centradas) - click derecho para abrir menú contextual
                 if not click_80_percent_left(boleta_window):
                     logger.error('No se pudo hacer click 80% izquierda')
-                    return False
-                time.sleep(0.5)
+                    return False, processed_count
                 
                 # 3. Seleccionar "Verificación Javier" en ComboBox "Fases disponibles" + Aceptar
                 if not select_fase_verificacion_javier(boleta_window):
                     logger.error('No se pudo seleccionar Verificación Javier')
-                    return False
-                time.sleep(0.5)
+                    return False, processed_count
                 
-                logger.info('Boleta con error procesada, continuando al siguiente lote')
-                continue  # Pasar al siguiente lote
+                # CASO 2: Boleta enviada a Verificación Javier -> NO incrementar i (reintento pendiente)
+                logger.info('Boleta {} enviada a Verificación Javier (reintento pendiente)'.format(i+1))
+                continue  # Siguiente iteración - misma posición i, la boleta volverá a AUTO
             # =====================================================
             
-            logger.info('Enviando Ctrl+L en boleta {}...'.format(i+1))
+            logger.info('Enviando Ctrl+L en boleta {}/{}...'.format(i+1, total_boletas))
             try:
                 boleta_window.type_keys('^l')
                 logger.info('Ctrl+L enviado en boleta {}'.format(i+1))
             except Exception as e:
                 logger.error('Fallo Ctrl+L en boleta {}: {}'.format(i+1, e))
-                return False
+                return False, processed_count
             
-            logger.info('Esperando 0.5 segundo...')
-            time.sleep(0.5)
+            # Esperar a que Ctrl+L procese la boleta (ventana cierre o siguiente boleta aparezca)
+            next_boleta = wait_for_ctrl_l_processed(boleta_window, app, BOLETA_TITLE_PATTERN, timeout=45)
+            if next_boleta:
+                boleta_window = next_boleta
+            
+            # CASO 1: Éxito normal -> Ctrl+L -> INCREMENTAR i
+            i += 1
+            processed_count += 1
         
-        logger.info('Loop completado. Cerrando aplicacion...')
+        logger.info('Loop completado ({} boletas procesadas). Cerrando aplicacion...'.format(processed_count))
         try:
             boleta_window.close()
             logger.info('Aplicacion cerrada')
@@ -229,11 +235,11 @@ def process_auto_queue_loop(main_window, app, auto_count, timeout=120):
             except Exception:
                 pass
         
-        return True, detected_count
+        return True, processed_count
         
     except Exception as e:
         logger.error('Error en loop AUTO: {}'.format(e))
-        return False, detected_count
+        return False, processed_count
 
 
 def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: Application, timeout: int = 10) -> Optional[WindowSpecification]:
@@ -243,12 +249,12 @@ def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: App
     '''
     logger.info('=== Seleccionando cola AUTO y abriendo primera boleta ===')
     
-    table = find_queue_table(main_window, timeout=1.5)
+    table = find_queue_table(main_window, timeout=15)
     if not table:
         logger.error('No se pudo encontrar la tabla de colas')
         return None
     
-    auto_row = find_auto_row(table, timeout=1.5)
+    auto_row = find_auto_row(table, timeout=10)
     if not auto_row:
         logger.error('No se encontr\u00f3 la fila AUTO')
         return None
@@ -264,7 +270,8 @@ def select_auto_queue_and_open_boleta(main_window: WindowSpecification, app: App
         logger.error('Fall\u00f3 click izquierdo en fila AUTO')
         return None
     
-    time.sleep(0.5)
+    # Esperar a que la fila quede seleccionada
+    wait_for_row_selected(auto_row, timeout=10)
     
     # Ctrl+G para abrir primera boleta
     logger.info('Enviando Ctrl+G para abrir primera boleta...')

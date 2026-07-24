@@ -15,10 +15,10 @@ EXE_PATH = r'C:\\Program Files\\ABBYY FlexiCapture 12 Stations\\FlexiCapture.exe
 
 def launch_verification_station(
     exe_path: str = EXE_PATH,
-    timeout_main_window: int = 60,
-    timeout_dialogs: int = 30,
-    timeout_project_window: int = 15,
-    timeout_queue_selection: int = 40,
+    timeout_main_window: int = 90,
+    timeout_dialogs: int = 45,
+    timeout_project_window: int = 25,
+    timeout_queue_selection: int = 60,
     backend: str = 'uia'
 ) -> Tuple[Application, object]:
     '''
@@ -98,7 +98,7 @@ def launch_verification_station(
         return app, main_window
     
     logger.info(f'Iniciando loop AUTO para {auto_count} boletas...')
-    success = process_auto_queue_loop(main_window, app, auto_count, timeout=timeout_queue_selection)
+    success = process_auto_queue_loop(main_window, app, timeout=timeout_queue_selection)
     
     if success:
         logger.info('Loop AUTO completado exitosamente')
@@ -110,10 +110,10 @@ def launch_verification_station(
 
 def launch_and_get_info(
     exe_path: str = EXE_PATH,
-    timeout_main_window: int = 60,
-    timeout_dialogs: int = 30,
-    timeout_project_window: int = 15,
-    timeout_queue_selection: int = 40,
+    timeout_main_window: int = 90,
+    timeout_dialogs: int = 45,
+    timeout_project_window: int = 25,
+    timeout_queue_selection: int = 60,
     backend: str = 'uia'
 ) -> dict:
     '''
